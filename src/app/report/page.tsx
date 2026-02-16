@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -103,6 +103,29 @@ export default function ReportPage() {
   const [dailySpendCap, setDailySpendCap] = useState("");
   const [scaleUpCondition, setScaleUpCondition] = useState("");
   const [exitCondition, setExitCondition] = useState("");
+  const [rulesSaved, setRulesSaved] = useState(false);
+
+  // 判断基準をlocalStorageから復元
+  useEffect(() => {
+    const saved = localStorage.getItem("decisionRules");
+    if (saved) {
+      const rules = JSON.parse(saved);
+      setHasNoRules(rules.hasNoRules || false);
+      setCutLossLine(rules.cutLossLine || "");
+      setDailySpendCap(rules.dailySpendCap || "");
+      setScaleUpCondition(rules.scaleUpCondition || "");
+      setExitCondition(rules.exitCondition || "");
+    }
+  }, []);
+
+  const saveDecisionRules = () => {
+    localStorage.setItem(
+      "decisionRules",
+      JSON.stringify({ hasNoRules, cutLossLine, dailySpendCap, scaleUpCondition, exitCondition })
+    );
+    setRulesSaved(true);
+    setTimeout(() => setRulesSaved(false), 2000);
+  };
 
   // Step 4: アクション
   const [actions, setActions] = useState<ActionItem[]>([emptyAction()]);
@@ -153,6 +176,12 @@ export default function ReportPage() {
   };
 
   const handleSubmit = async () => {
+    const missingFields = actions.some((a) => !a.referenceUrl || !a.planB);
+    if (missingFields) {
+      alert("アクションの「参考事例・URL」と「ダメだった場合の次の手」をすべて入力してください");
+      setCurrentStep(3);
+      return;
+    }
     setIsSubmitting(true);
     const input: ReportInput = {
       metrics: projects,
@@ -423,6 +452,18 @@ export default function ReportPage() {
                       placeholder="例: 3日連続ROAS100%未満で停止"
                     />
                   </div>
+                  <div className="pt-2">
+                    <Button
+                      variant="outline"
+                      onClick={saveDecisionRules}
+                      className={rulesSaved ? "border-green-500 text-green-600" : ""}
+                    >
+                      {rulesSaved ? "保存しました" : "この判断基準を保存する"}
+                    </Button>
+                    <p className="text-xs text-gray-400 mt-1">
+                      保存すると次回以降、自動で入力されます
+                    </p>
+                  </div>
                 </div>
               )}
             </CardContent>
@@ -517,18 +558,23 @@ export default function ReportPage() {
                     />
                   </div>
                   <div>
-                    <Label className="text-xs">参考事例・URL（任意）</Label>
+                    <Label className="text-xs">参考事例・URL</Label>
                     <Input
                       value={action.referenceUrl}
                       onChange={(e) =>
                         updateAction(i, "referenceUrl", e.target.value)
                       }
-                      placeholder="例: https://..."
+                      placeholder="例: https://... またはテキストで参考事例を記述"
                     />
+                    {!action.referenceUrl && (
+                      <p className="text-xs text-red-500 mt-1">
+                        参考事例またはURLを入力してください
+                      </p>
+                    )}
                   </div>
                   <div>
                     <Label className="text-xs">
-                      ダメだった場合の次の手（任意）
+                      ダメだった場合の次の手
                     </Label>
                     <Input
                       value={action.planB}
@@ -536,8 +582,8 @@ export default function ReportPage() {
                       placeholder="例: バナー形式に切り替えてテスト"
                     />
                     {!action.planB && (
-                      <p className="text-xs text-amber-600 mt-1">
-                        未設定の場合、フィードバックで指摘されます
+                      <p className="text-xs text-red-500 mt-1">
+                        次の手を入力してください
                       </p>
                     )}
                   </div>
