@@ -1,4 +1,4 @@
-import { ReportInput } from "@/types";
+import { ReportInput, TargetData } from "@/types";
 
 const SYSTEM_PROMPT = `あなたは、広告運用チームのマネージャーとして、メンバーの日報に対してフィードバックを行います。
 
@@ -94,15 +94,54 @@ function formatPhase(phase: string): string {
   return map[phase] || phase;
 }
 
+function formatTargetData(data: TargetData): string {
+  let text = "### 目標状況（スプレッドシートから自動取得）\n\n";
+
+  text += `**${data.month} 月間サマリー**\n`;
+  text += `- 月間目標: ${data.summary.target.toLocaleString()}円\n`;
+  text += `- 実績: ${data.summary.actual.toLocaleString()}円\n`;
+  text += `- 差分: ${data.summary.gap.toLocaleString()}円\n`;
+  text += `- 残日数あたり必要額: ${data.summary.perRemainingDay.toLocaleString()}円\n`;
+  const pct = data.summary.target > 0
+    ? Math.round((data.summary.actual / data.summary.target) * 100)
+    : 0;
+  text += `- 達成率: ${pct}%\n`;
+
+  if (data.weekly.length > 0) {
+    text += `\n**週別推移**\n`;
+    for (const w of data.weekly) {
+      const wPct = w.target > 0 ? Math.round((w.actual / w.target) * 100) : 0;
+      text += `- ${w.period}: 目標${w.target.toLocaleString()}円 / 実績${w.actual.toLocaleString()}円（${wPct}%）\n`;
+    }
+  }
+
+  if (data.projects.length > 0) {
+    text += `\n**案件別実績**\n`;
+    for (const p of data.projects) {
+      text += `- ${p.name}（${p.medium}）: 月目標${p.monthlyTarget.toLocaleString()}円 / 実績${p.monthlyActual.toLocaleString()}円 / 残日数あたり${p.perRemainingDay.toLocaleString()}円\n`;
+    }
+  }
+
+  return text;
+}
+
 export function formatInputForPrompt(input: ReportInput): string {
   let text = "## メンバーの日報データ\n\n";
 
-  // Step 1: 数値実績
-  text += "### 数値実績\n";
-  for (const project of input.metrics) {
-    text += `\n**${project.projectName}**\n`;
-    for (const ch of project.channels) {
-      text += `- ${ch.channelName}: 消化${ch.spend.toLocaleString()}円 / 売上${ch.revenue.toLocaleString()}円 / 粗利${ch.grossProfit.toLocaleString()}円\n`;
+  // Step 1: 目標データ（スプレッドシート連携）
+  if (input.targetData) {
+    text += formatTargetData(input.targetData);
+    text += "\n";
+  }
+
+  // Step 1 (legacy): 数値実績（手入力）
+  if (input.metrics && input.metrics.length > 0 && input.metrics[0].projectName) {
+    text += "### 数値実績\n";
+    for (const project of input.metrics) {
+      text += `\n**${project.projectName}**\n`;
+      for (const ch of project.channels) {
+        text += `- ${ch.channelName}: 消化${ch.spend.toLocaleString()}円 / 売上${ch.revenue.toLocaleString()}円 / 粗利${ch.grossProfit.toLocaleString()}円\n`;
+      }
     }
   }
 

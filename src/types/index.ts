@@ -34,6 +34,39 @@ export interface FeedbackResult {
   };
 }
 
+// ===== 目標データの型定義 =====
+
+export interface TargetSummary {
+  target: number;
+  actual: number;
+  gap: number;
+  perRemainingDay: number;
+}
+
+export interface WeeklyTarget {
+  period: string;
+  target: number;
+  actual: number;
+  gap: number;
+}
+
+export interface ProjectTarget {
+  name: string;
+  medium: string;
+  monthlyTarget: number;
+  weeklyTarget: number;
+  dailyTarget: number;
+  monthlyActual: number;
+  perRemainingDay: number;
+}
+
+export interface TargetData {
+  month: string;
+  summary: TargetSummary;
+  weekly: WeeklyTarget[];
+  projects: ProjectTarget[];
+}
+
 // ===== 入力フォームの型定義 =====
 
 export interface ChannelMetrics {
@@ -90,7 +123,9 @@ export interface PhaseRecognition {
 }
 
 export interface ReportInput {
-  /** Step 1: 数値実績 */
+  /** Step 1: 目標ダッシュボード（スプレッドシートから自動取得） */
+  targetData?: TargetData;
+  /** Step 1 (legacy): 数値実績（手入力） */
   metrics: ProjectMetrics[];
   /** Step 2: 分析 */
   analysis: AnalysisInput;

@@ -1,6 +1,6 @@
 import { google } from "googleapis";
 import path from "path";
-import type { ReportInput, FeedbackResult } from "@/types";
+import type { ReportInput, FeedbackResult, TargetData } from "@/types";
 
 function getAuth() {
   // Vercel: 環境変数にJSON文字列として格納
@@ -114,18 +114,32 @@ const PHASE_LABELS: Record<string, string> = {
   channel_expansion: "媒体開拓（新しいチャネルを開く段階）",
 };
 
-function formatMetrics(metrics: ReportInput["metrics"]): string {
-  return metrics
-    .map((project) => {
+function formatMetrics(input: ReportInput): string {
+  const parts: string[] = [];
+
+  // 目標データ（スプレッドシート連携）
+  if (input.targetData) {
+    const t = input.targetData;
+    parts.push(`【${t.month} 月間】目標${t.summary.target.toLocaleString()} / 実績${t.summary.actual.toLocaleString()} / 差分${t.summary.gap.toLocaleString()}`);
+    for (const p of t.projects) {
+      parts.push(`  ${p.name}(${p.medium}): 月目標${p.monthlyTarget.toLocaleString()} / 実績${p.monthlyActual.toLocaleString()}`);
+    }
+  }
+
+  // 手入力数値（legacy）
+  if (input.metrics && input.metrics.length > 0 && input.metrics[0].projectName) {
+    for (const project of input.metrics) {
       const channels = project.channels
         .map(
           (ch) =>
             `  ${ch.channelName}: 消化${ch.spend} / 売上${ch.revenue} / 粗利${ch.grossProfit}`
         )
         .join("\n");
-      return `【${project.projectName}】\n${channels}`;
-    })
-    .join("\n");
+      parts.push(`【${project.projectName}】\n${channels}`);
+    }
+  }
+
+  return parts.join("\n");
 }
 
 function formatActions(actions: ReportInput["actions"]): string {
@@ -135,6 +149,85 @@ function formatActions(actions: ReportInput["actions"]): string {
         `[${i + 1}] ${a.projectName} / ${a.medium}: ${a.action}（検証: ${a.verificationGoal}）`
     )
     .join("\n");
+}
+
+/**
+ * 円表記の文字列を数値に変換（例: "¥40,000,000" → 40000000）
+ */
+function parseCurrency(value: string | undefined | null): number {
+  if (!value) return 0;
+  return Number(String(value).replace(/[¥￥,、\s]/g, "")) || 0;
+}
+
+/**
+ * 目標スプレッドシートからデータを取得
+ */
+export async function readTargetData(): Promise<TargetData> {
+  const spreadsheetId = process.env.GOOGLE_TARGET_SPREADSHEET_ID;
+  if (!spreadsheetId) throw new Error("GOOGLE_TARGET_SPREADSHEET_ID is not set");
+
+  const sheets = getSheets();
+
+  // シート全体を取得（A1:G50の範囲で十分）
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "目標!A1:G50",
+  });
+
+  const rows = res.data.values || [];
+
+  // Row 2 (index 1): 月合計サマリー
+  // B: "2月合計", C: 目標, D: 実績, E: 差分, F: 残日数あたり
+  const summaryRow = rows[1] || [];
+  const monthLabel = String(summaryRow[1] || "");
+  // 月名を抽出（例: "2月合計" → "2026年02月"）
+  const now = new Date();
+  const monthMatch = monthLabel.match(/(\d+)月/);
+  const monthNum = monthMatch ? parseInt(monthMatch[1]) : now.getMonth() + 1;
+  const month = `${now.getFullYear()}年${String(monthNum).padStart(2, "0")}月`;
+
+  const summary = {
+    target: parseCurrency(summaryRow[2]),
+    actual: parseCurrency(summaryRow[3]),
+    gap: parseCurrency(summaryRow[4]),
+    perRemainingDay: parseCurrency(summaryRow[5]),
+  };
+
+  // Row 3-6 (index 2-5): 週別データ
+  const weekly = [];
+  for (let i = 2; i <= 5; i++) {
+    const row = rows[i];
+    if (!row || !row[1]) break;
+    const period = String(row[1] || "");
+    // 空行や非週データをスキップ
+    if (!period.includes("〜") && !period.includes("~")) break;
+    weekly.push({
+      period,
+      target: parseCurrency(row[2]),
+      actual: parseCurrency(row[3]),
+      gap: parseCurrency(row[4]),
+    });
+  }
+
+  // Row 10以降 (index 9~): 案件別データ
+  // Row 9 (index 8): ヘッダー: A:案件名, B:媒体, C:月目標, D:週目標, E:日目標, F:月実績, G:残日数あたり
+  // Row 10 (index 9): 合計行（スキップ）
+  const projects = [];
+  for (let i = 10; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || !row[0]) break; // 空行で終了
+    projects.push({
+      name: String(row[0] || ""),
+      medium: String(row[1] || ""),
+      monthlyTarget: parseCurrency(row[2]),
+      weeklyTarget: parseCurrency(row[3]),
+      dailyTarget: parseCurrency(row[4]),
+      monthlyActual: parseCurrency(row[5]),
+      perRemainingDay: parseCurrency(row[6]),
+    });
+  }
+
+  return { month, summary, weekly, projects };
 }
 
 /**
@@ -158,7 +251,7 @@ export async function saveToSpreadsheet(
 
   const row = [
     now,
-    formatMetrics(input.metrics),
+    formatMetrics(input),
     CAUSE_LABELS[input.analysis.primaryCause] || input.analysis.primaryCause,
     input.analysis.detail,
     input.decisionRules.cutLossLine,

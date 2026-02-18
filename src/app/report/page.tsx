@@ -17,10 +17,11 @@ import type {
   AnalysisCause,
   ActionItem,
   CurrentPhase,
+  TargetData,
 } from "@/types";
 
 const STEPS = [
-  "数値実績",
+  "目標状況",
   "分析",
   "判断基準",
   "アクション",
@@ -89,7 +90,12 @@ export default function ReportPage() {
   const [currentStep, setCurrentStep] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Step 1: 数値実績
+  // Step 1: 目標ダッシュボード
+  const [targetData, setTargetData] = useState<TargetData | null>(null);
+  const [targetLoading, setTargetLoading] = useState(true);
+  const [targetError, setTargetError] = useState<string | null>(null);
+
+  // Step 1 (legacy): 数値実績
   const [projects, setProjects] = useState<ProjectMetrics[]>([emptyProject()]);
 
   // Step 2: 分析
@@ -104,6 +110,28 @@ export default function ReportPage() {
   const [scaleUpCondition, setScaleUpCondition] = useState("");
   const [exitCondition, setExitCondition] = useState("");
   const [rulesSaved, setRulesSaved] = useState(false);
+
+  // 目標データを取得
+  useEffect(() => {
+    async function fetchTargets() {
+      try {
+        const res = await fetch("/api/targets");
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || "データの取得に失敗しました");
+        }
+        const data: TargetData = await res.json();
+        setTargetData(data);
+      } catch (err) {
+        setTargetError(
+          err instanceof Error ? err.message : "データの取得に失敗しました"
+        );
+      } finally {
+        setTargetLoading(false);
+      }
+    }
+    fetchTargets();
+  }, []);
 
   // 判断基準をlocalStorageから復元
   useEffect(() => {
@@ -184,6 +212,7 @@ export default function ReportPage() {
     }
     setIsSubmitting(true);
     const input: ReportInput = {
+      targetData: targetData || undefined,
       metrics: projects,
       analysis: { primaryCause: analysisCause, detail: analysisDetail },
       decisionRules: {
@@ -243,104 +272,209 @@ export default function ReportPage() {
           ))}
         </div>
 
-        {/* Step 1: 数値実績 */}
+        {/* Step 1: 目標ダッシュボード */}
         {currentStep === 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Step 1: 数値実績</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {projects.map((proj, pi) => (
-                <div key={pi} className="space-y-4 p-4 border rounded-lg">
-                  <div>
-                    <Label>案件名</Label>
-                    <Input
-                      value={proj.projectName}
-                      onChange={(e) =>
-                        updateProject(pi, "projectName", e.target.value)
-                      }
-                      placeholder="例: オリパ、SHIFTAI"
-                    />
+          <div className="space-y-4">
+            {targetLoading && (
+              <Card>
+                <CardContent className="py-12 text-center text-gray-500">
+                  <div className="animate-pulse space-y-3">
+                    <div className="h-4 bg-gray-200 rounded w-1/3 mx-auto" />
+                    <div className="h-4 bg-gray-200 rounded w-1/2 mx-auto" />
                   </div>
-                  {proj.channels.map((ch, ci) => (
-                    <div
-                      key={ci}
-                      className="grid grid-cols-4 gap-3 p-3 bg-gray-50 rounded"
-                    >
-                      <div>
-                        <Label className="text-xs">媒体名</Label>
-                        <Input
-                          value={ch.channelName}
-                          onChange={(e) =>
-                            updateChannel(pi, ci, "channelName", e.target.value)
-                          }
-                          placeholder="Meta"
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-xs">消化（円）</Label>
-                        <Input
-                          type="number"
-                          value={ch.spend || ""}
-                          onChange={(e) =>
-                            updateChannel(
-                              pi,
-                              ci,
-                              "spend",
-                              Number(e.target.value)
-                            )
-                          }
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-xs">売上（円）</Label>
-                        <Input
-                          type="number"
-                          value={ch.revenue || ""}
-                          onChange={(e) =>
-                            updateChannel(
-                              pi,
-                              ci,
-                              "revenue",
-                              Number(e.target.value)
-                            )
-                          }
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-xs">粗利（円）</Label>
-                        <Input
-                          type="number"
-                          value={ch.grossProfit || ""}
-                          onChange={(e) =>
-                            updateChannel(
-                              pi,
-                              ci,
-                              "grossProfit",
-                              Number(e.target.value)
-                            )
-                          }
-                        />
-                      </div>
-                    </div>
-                  ))}
+                  <p className="mt-4">目標データを読み込み中...</p>
+                </CardContent>
+              </Card>
+            )}
+
+            {targetError && (
+              <Card>
+                <CardContent className="py-8 text-center">
+                  <p className="text-red-600 font-medium mb-2">データ取得エラー</p>
+                  <p className="text-sm text-gray-500 mb-4">{targetError}</p>
                   <Button
                     variant="outline"
-                    size="sm"
-                    onClick={() => addChannel(pi)}
+                    onClick={() => {
+                      setTargetError(null);
+                      setTargetLoading(true);
+                      fetch("/api/targets")
+                        .then((r) => r.json())
+                        .then((d) => {
+                          if (d.error) throw new Error(d.error);
+                          setTargetData(d);
+                        })
+                        .catch((e) => setTargetError(e.message))
+                        .finally(() => setTargetLoading(false));
+                    }}
                   >
-                    + 媒体を追加
+                    再読み込み
                   </Button>
-                </div>
-              ))}
-              <Button
-                variant="outline"
-                onClick={() => setProjects((p) => [...p, emptyProject()])}
-              >
-                + 案件を追加
-              </Button>
-            </CardContent>
-          </Card>
+                </CardContent>
+              </Card>
+            )}
+
+            {targetData && !targetLoading && (
+              <>
+                {/* 月間サマリーカード */}
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="flex items-center justify-between">
+                      <span>Step 1: {targetData.month} 目標状況</span>
+                      <Badge variant="outline" className="text-xs font-normal">
+                        スプレッドシート連携
+                      </Badge>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {/* サマリー数値 */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div className="p-3 bg-blue-50 rounded-lg">
+                        <p className="text-xs text-blue-600 font-medium">月間目標</p>
+                        <p className="text-lg font-bold text-blue-900">
+                          {targetData.summary.target.toLocaleString()}
+                          <span className="text-xs font-normal ml-0.5">円</span>
+                        </p>
+                      </div>
+                      <div className="p-3 bg-green-50 rounded-lg">
+                        <p className="text-xs text-green-600 font-medium">実績</p>
+                        <p className="text-lg font-bold text-green-900">
+                          {targetData.summary.actual.toLocaleString()}
+                          <span className="text-xs font-normal ml-0.5">円</span>
+                        </p>
+                      </div>
+                      <div className="p-3 bg-red-50 rounded-lg">
+                        <p className="text-xs text-red-600 font-medium">差分</p>
+                        <p className="text-lg font-bold text-red-900">
+                          {targetData.summary.gap.toLocaleString()}
+                          <span className="text-xs font-normal ml-0.5">円</span>
+                        </p>
+                      </div>
+                      <div className="p-3 bg-amber-50 rounded-lg">
+                        <p className="text-xs text-amber-600 font-medium">残日数あたり</p>
+                        <p className="text-lg font-bold text-amber-900">
+                          {targetData.summary.perRemainingDay.toLocaleString()}
+                          <span className="text-xs font-normal ml-0.5">円</span>
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* 進捗バー */}
+                    {targetData.summary.target > 0 && (
+                      <div>
+                        <div className="flex justify-between text-xs text-gray-500 mb-1">
+                          <span>達成率</span>
+                          <span>
+                            {Math.round(
+                              (targetData.summary.actual / targetData.summary.target) * 100
+                            )}
+                            %
+                          </span>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-3">
+                          <div
+                            className="bg-blue-600 h-3 rounded-full transition-all"
+                            style={{
+                              width: `${Math.min(
+                                100,
+                                Math.round(
+                                  (targetData.summary.actual / targetData.summary.target) * 100
+                                )
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* 週別推移 */}
+                {targetData.weekly.length > 0 && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-base">週別推移</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-3">
+                        {targetData.weekly.map((w, i) => {
+                          const pct =
+                            w.target > 0
+                              ? Math.round((w.actual / w.target) * 100)
+                              : 0;
+                          return (
+                            <div key={i} className="space-y-1">
+                              <div className="flex justify-between text-sm">
+                                <span className="text-gray-700">{w.period}</span>
+                                <span className="text-gray-500">
+                                  {w.actual.toLocaleString()} / {w.target.toLocaleString()}円
+                                  <span className="ml-2 font-medium">
+                                    ({pct}%)
+                                  </span>
+                                </span>
+                              </div>
+                              <div className="w-full bg-gray-100 rounded-full h-2">
+                                <div
+                                  className={`h-2 rounded-full transition-all ${
+                                    pct >= 100
+                                      ? "bg-green-500"
+                                      : pct >= 70
+                                        ? "bg-blue-500"
+                                        : "bg-red-400"
+                                  }`}
+                                  style={{ width: `${Math.min(100, pct)}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* 案件別テーブル */}
+                {targetData.projects.length > 0 && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-base">案件別実績</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b text-left text-gray-500">
+                              <th className="py-2 pr-2 font-medium">案件名</th>
+                              <th className="py-2 pr-2 font-medium">媒体</th>
+                              <th className="py-2 pr-2 font-medium text-right">月目標</th>
+                              <th className="py-2 pr-2 font-medium text-right">月実績</th>
+                              <th className="py-2 font-medium text-right">残日数あたり</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {targetData.projects.map((p, i) => (
+                              <tr key={i} className="border-b last:border-0">
+                                <td className="py-2 pr-2 font-medium">{p.name}</td>
+                                <td className="py-2 pr-2 text-gray-600">{p.medium}</td>
+                                <td className="py-2 pr-2 text-right">
+                                  {p.monthlyTarget.toLocaleString()}
+                                </td>
+                                <td className="py-2 pr-2 text-right">
+                                  {p.monthlyActual.toLocaleString()}
+                                </td>
+                                <td className="py-2 text-right text-amber-700 font-medium">
+                                  {p.perRemainingDay.toLocaleString()}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+              </>
+            )}
+          </div>
         )}
 
         {/* Step 2: 分析 */}
