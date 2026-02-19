@@ -1,4 +1,4 @@
-import { ReportInput, TargetData } from "@/types";
+import { ReportInput, TargetData, CampaignRow, CampaignSummary, ScheduleEntry, ProgressSnapshot } from "@/types";
 
 const SYSTEM_PROMPT = `あなたは、広告運用チームのマネージャーとして、メンバーの日報に対してフィードバックを行います。
 
@@ -73,25 +73,91 @@ const FEEDBACK_STRUCTURE = `## フィードバックパターン
 5. アンチパターン警告（損失・非効率時）
 6. フレームワーク提供（整理不能時）`;
 
-function formatAnalysisCause(cause: string): string {
-  const map: Record<string, string> = {
-    creative: "CR（クリエイティブ）の問題",
-    operation: "運用設定の問題",
-    market: "市場・外部環境の変化",
-    resource: "リソース不足",
-    unidentified: "まだ特定できていない",
-  };
-  return map[cause] || cause;
+const LAYER1_RUBRIC = `## Layer 1: 目標進捗×リソース配分 評価フレームワーク
+
+### キャンペーン分類指示
+各キャンペーンを以下の基準で「伸長(growing)」または「停滞(stagnant)」に分類してください:
+- **伸長(growing)**: ROAS・CV・売上が目標以上、または上昇トレンドにある案件
+- **停滞(stagnant)**: ROAS・CV・売上が目標未達、または下降・横ばいトレンドの案件
+
+### (2) 伸長案件へのリソース判断
+- Lv.1: 伸長案件の認識なし、または言及なし
+- Lv.2: 認識あるが「もっと予算を増やす」等の抽象的記述のみ
+- Lv.3: 具体的な配分量（予算額・比率）+根拠（数値ベース）が明示されている
+- Lv.4: Lv.3に加え、持続条件の定義+拡大ステップがif-then形式で記述されている
+
+### (3) 停滞案件への打開策
+- Lv.1: 対策なし、または「様子を見る」のみ
+- Lv.2: 変更意思はあるが施策の粒度が不足（「クリエイティブを変える」等）
+- Lv.3: 原因仮説が明確+具体的施策+損切り基準が定義されている
+- Lv.4: Lv.3に加え、タイムライン+複数シナリオ+撤退後のリソース再配置まで記述
+
+### (4) 全体リソース配分の合理性
+- Lv.1: 全体像への言及なし。個別案件の記述のみ
+- Lv.2: 全体のバランスを意識しているが比率・数値が不明確
+- Lv.3: 数値根拠に基づく配分（例: 伸長70%/停滞20%/新規10%）が明示されている
+- Lv.4: Lv.3に加え、トリガー条件（配分変更のif-then）+月間目標からの逆算が統合されている`;
+
+
+function formatCampaignData(rows: CampaignRow[], summary: CampaignSummary | null): string {
+  let text = "";
+
+  if (summary) {
+    text += `**キャンペーン実績サマリー（${summary.campaignCount}件）**\n`;
+    text += `- 総消化: ${summary.totalSpend.toLocaleString()}円\n`;
+    text += `- 総CV: ${summary.totalCV}\n`;
+    text += `- 総MCV: ${summary.totalMCV}\n`;
+    text += `- 総売上: ${summary.totalRevenue.toLocaleString()}円\n`;
+    text += `- 平均ROAS: ${summary.avgROAS}%\n`;
+  }
+
+  const newCPs = rows.filter((r) => r.label === "new");
+  const existingCPs = rows.filter((r) => r.label === "existing");
+  const unlabeled = rows.filter((r) => !r.label);
+
+  if (newCPs.length > 0) {
+    text += `\n**新規キャンペーン（${newCPs.length}件）**\n`;
+    for (const r of newCPs) {
+      text += `\n- ${r.cpName}: 消化${r.spend.toLocaleString()}円 / CV${r.cv} / MCV${r.mcv} / ROAS${r.roas}% / 売上${r.revenue.toLocaleString()}円\n`;
+      if (r.testPurpose) text += `  - 検証目的: ${r.testPurpose}\n`;
+      if (r.testResult) text += `  - 結果: ${r.testResult}\n`;
+      if (r.interpretation) text += `  - 解釈: ${r.interpretation}\n`;
+    }
+  }
+
+  if (existingCPs.length > 0) {
+    text += `\n**既存キャンペーン（${existingCPs.length}件）**\n`;
+    for (const r of existingCPs) {
+      text += `\n- ${r.cpName}: 消化${r.spend.toLocaleString()}円 / CV${r.cv} / MCV${r.mcv} / ROAS${r.roas}% / 売上${r.revenue.toLocaleString()}円\n`;
+      if (r.change) text += `  - 変化: ${r.change}\n`;
+      if (r.nextAction) text += `  - 翌日アクション: ${r.nextAction}\n`;
+    }
+  }
+
+  if (unlabeled.length > 0) {
+    text += `\n**未分類キャンペーン（${unlabeled.length}件）**\n`;
+    for (const r of unlabeled) {
+      text += `- ${r.cpName}: 消化${r.spend.toLocaleString()}円 / CV${r.cv} / MCV${r.mcv} / ROAS${r.roas}% / 売上${r.revenue.toLocaleString()}円\n`;
+    }
+  }
+
+  return text;
 }
 
-function formatPhase(phase: string): string {
-  const map: Record<string, string> = {
-    creative_production: "CR制作（新しい当たりを見つける段階）",
-    operation_optimization: "運用最適化（当たりCRを伸ばす段階）",
-    testing: "検証・テスト（仮説を確かめる段階）",
-    channel_expansion: "媒体開拓（新しいチャネルを開く段階）",
-  };
-  return map[phase] || phase;
+function formatSchedule(schedule: ScheduleEntry[], actionPlans: ReportInput["actionPlans"]): string {
+  if (!schedule || schedule.length === 0) return "スケジュール: 未設定\n";
+  let text = "";
+  for (const entry of schedule) {
+    text += `- ${entry.startTime}〜${entry.endTime}: ${entry.title}`;
+    if (entry.actionPlanIndex != null && actionPlans[entry.actionPlanIndex]) {
+      text += `（アクション${entry.actionPlanIndex + 1}に紐付き）`;
+    }
+    text += "\n";
+    if (entry.description) {
+      text += `  メモ: ${entry.description}\n`;
+    }
+  }
+  return text;
 }
 
 function formatTargetData(data: TargetData): string {
@@ -145,66 +211,119 @@ export function formatInputForPrompt(input: ReportInput): string {
     }
   }
 
-  // Step 2: 分析
-  text += `\n### 分析\n`;
-  text += `- 主な原因: ${formatAnalysisCause(input.analysis.primaryCause)}\n`;
-  text += `- 詳細: ${input.analysis.detail}\n`;
-
-  // Step 3: 判断基準
-  text += `\n### 判断基準\n`;
-  if (input.decisionRules.hasNoRules) {
-    text += `- **ルールをまだ設定していない**\n`;
+  // Step 2: キャンペーン実績 + 振り返り
+  text += `\n### キャンペーン実績・振り返り\n`;
+  if (input.analysis.campaignData.length > 0 || input.analysis.campaignSummary) {
+    text += formatCampaignData(input.analysis.campaignData, input.analysis.campaignSummary);
   } else {
-    if (input.decisionRules.cutLossLine)
-      text += `- 損切りライン: ${input.decisionRules.cutLossLine}\n`;
-    if (input.decisionRules.dailySpendCap)
-      text += `- 1日の消化上限: ${input.decisionRules.dailySpendCap}\n`;
-    if (input.decisionRules.scaleUpCondition)
-      text += `- 拡大の条件: ${input.decisionRules.scaleUpCondition}\n`;
-    if (input.decisionRules.exitCondition)
-      text += `- 撤退の条件: ${input.decisionRules.exitCondition}\n`;
+    text += `- キャンペーンデータ: なし\n`;
   }
 
-  // Step 4: アクション
-  text += `\n### 明日のアクション\n`;
-  for (const action of input.actions) {
-    text += `\n**${action.projectName} / ${action.medium}**\n`;
-    text += `- やること: ${action.action}\n`;
-    if (action.verificationGoal)
-      text += `- 検証したいこと: ${action.verificationGoal}\n`;
-    if (action.referenceUrl)
-      text += `- 参考事例: ${action.referenceUrl}\n`;
-    if (action.successCriteria)
-      text += `- 成功基準: ${action.successCriteria}\n`;
-    if (action.planB) text += `- プランB: ${action.planB}\n`;
-    else text += `- プランB: （未設定）\n`;
+  // Step 3: ネクストアクション
+  text += `\n### ネクストアクション\n`;
+  for (let i = 0; i < input.actionPlans.length; i++) {
+    const plan = input.actionPlans[i];
+    if (input.actionPlans.length > 1) {
+      text += `\n**アクション${i + 1}**\n`;
+    }
+    if (plan.resourceAllocation) {
+      text += `- リソース配分: ${plan.resourceAllocation}\n`;
+    }
+    if (plan.creativeStrategy) {
+      text += `- CR戦略: ${plan.creativeStrategy}\n`;
+    }
+    if (plan.creativeVision) {
+      text += `- 具体的CRイメージ: ${plan.creativeVision}\n`;
+    }
+    if (plan.referenceUrls && plan.referenceUrls.length > 0) {
+      text += `- 参考URL:\n`;
+      for (const url of plan.referenceUrls) {
+        text += `  - ${url}\n`;
+      }
+    }
   }
 
-  // Step 5: フェーズ認識
-  text += `\n### フェーズ認識\n`;
-  text += `- 現在のフェーズ: ${formatPhase(input.phaseRecognition.currentPhase)}\n`;
-  text += `- 理由: ${input.phaseRecognition.reason}\n`;
+  // Step 4: 明日のスケジュール
+  text += `\n### 明日のスケジュール\n`;
+  text += formatSchedule(input.schedule, input.actionPlans);
 
   return text;
+}
+
+export function buildProgressSnapshot(input: ReportInput): ProgressSnapshot | null {
+  const target = input.targetData;
+  const summary = input.analysis.campaignSummary;
+
+  if (!target) return null;
+
+  const monthlyTarget = target.summary.target;
+  const monthlyActual = target.summary.actual;
+  const gap = target.summary.gap;
+  const achievementRate = monthlyTarget > 0
+    ? Math.round((monthlyActual / monthlyTarget) * 1000) / 10
+    : 0;
+  const todayTotalRevenue = summary ? summary.totalRevenue : 0;
+  const dailyRequiredAmount = target.summary.perRemainingDay;
+  const dailyAchievementRate = dailyRequiredAmount > 0
+    ? Math.round((todayTotalRevenue / dailyRequiredAmount) * 1000) / 10
+    : 0;
+
+  return {
+    monthlyTarget,
+    monthlyActual,
+    gap,
+    achievementRate,
+    todayTotalRevenue,
+    dailyRequiredAmount,
+    dailyAchievementRate,
+  };
+}
+
+function formatProgressSnapshot(snapshot: ProgressSnapshot): string {
+  return `### 進捗スナップショット（自動算出）
+- 月間目標: ${snapshot.monthlyTarget.toLocaleString()}円
+- 月間実績: ${snapshot.monthlyActual.toLocaleString()}円
+- 差分: ${snapshot.gap.toLocaleString()}円
+- 月間達成率: ${snapshot.achievementRate}%
+- 本日売上合計: ${snapshot.todayTotalRevenue.toLocaleString()}円
+- 日次必要額: ${snapshot.dailyRequiredAmount.toLocaleString()}円
+- 日次達成率: ${snapshot.dailyAchievementRate}%`;
 }
 
 export function buildEvaluationPrompt(input: ReportInput): {
   system: string;
   user: string;
+  progressSnapshot: ProgressSnapshot | null;
 } {
   const formattedInput = formatInputForPrompt(input);
+  const snapshot = buildProgressSnapshot(input);
+
+  const snapshotContext = snapshot
+    ? `\n\n${formatProgressSnapshot(snapshot)}\n`
+    : "";
 
   return {
     system: SYSTEM_PROMPT,
-    user: `${EVALUATION_RUBRIC}
+    progressSnapshot: snapshot,
+    user: `${LAYER1_RUBRIC}
+
+${EVALUATION_RUBRIC}
 
 ${PRINCIPLES}
 
 ${formattedInput}
-
+${snapshotContext}
 ---
 
-上記のメンバー日報データを5軸で評価し、以下のJSON形式で出力してください。
+上記のメンバー日報データを**Layer 1（目標進捗×リソース配分）+ Layer 2（5軸評価）**の2レイヤーで評価してください。
+
+**Layer 1:**
+- 各キャンペーンを「伸長(growing)」「停滞(stagnant)」に分類し、分類理由を記述
+- (2) 伸長案件へのリソース判断: Lv.1-4で評価
+- (3) 停滞案件への打開策: Lv.1-4で評価
+- (4) 全体リソース配分の合理性: Lv.1-4で評価
+
+**Layer 2:**
 各軸のlevelは1-4の整数、reasoningはその判定理由（メンバーの記述から具体的に引用すること）です。
 feedbackPatternは "A", "B", "C" のいずれかです。
 applicablePrinciplesは該当する原則ID（P01-P07）の配列です。
@@ -214,9 +333,49 @@ applicableAntiPatternsは該当するアンチパターンID（AP01-AP05）の�
 
 export function buildFeedbackPrompt(
   input: ReportInput,
-  evaluationJson: string
+  evaluationJson: string,
+  progressSnapshot: ProgressSnapshot | null
 ): { system: string; user: string } {
   const formattedInput = formatInputForPrompt(input);
+  const snapshotContext = progressSnapshot
+    ? `\n\n${formatProgressSnapshot(progressSnapshot)}\n`
+    : "";
+
+  const hasLayer1 = progressSnapshot !== null;
+
+  const outputInstructions = hasLayer1
+    ? `上記の評価結果に基づいて、フィードバックを生成してください。
+
+**出力形式:**
+以下の2セクションに分けて出力すること:
+
+【LAYER1_START】
+Layer 1フィードバック:
+- 進捗認識（月間・日次の達成状況への言及）
+- キャンペーン分類に基づくリソース配分の指導
+- 伸長案件への投資判断と停滞案件への打開策
+- 全体リソース配分の改善提案
+【LAYER1_END】
+
+【LAYER2_START】
+Layer 2フィードバック:
+- 2層構造（必須レイヤー + 条件付きレイヤー）に従うこと
+- 番号付き(1. 2. 3.)で案件・媒体ごとに整理し、(a)(b)の小項目で具体化すること
+- メンバーの具体的な記述を参照しながらフィードバックすること
+【LAYER2_END】
+
+注意:
+- 必ず【LAYER1_START】【LAYER1_END】【LAYER2_START】【LAYER2_END】のデリミタを使用すること
+- フィードバックのテキストのみを出力すること（JSON不要）
+- 日本語で出力すること`
+    : `上記の評価結果に基づいて、フィードバックを生成してください。
+
+注意:
+- 2層構造（必須レイヤー + 条件付きレイヤー）に従うこと
+- 番号付き(1. 2. 3.)で案件・媒体ごとに整理し、(a)(b)の小項目で具体化すること
+- メンバーの具体的な記述を参照しながらフィードバックすること
+- フィードバックのテキストのみを出力すること（JSON不要）
+- 日本語で出力すること`;
 
   return {
     system: SYSTEM_PROMPT,
@@ -225,21 +384,14 @@ export function buildFeedbackPrompt(
 ${PRINCIPLES}
 
 ${formattedInput}
-
+${snapshotContext}
 ---
 
-## 5軸評価結果
+## 評価結果（Layer 1 + Layer 2）
 ${evaluationJson}
 
 ---
 
-上記の評価結果に基づいて、フィードバックを生成してください。
-
-注意:
-- 2層構造（必須レイヤー + 条件付きレイヤー）に従うこと
-- 番号付き(1. 2. 3.)で案件・媒体ごとに整理し、(a)(b)の小項目で具体化すること
-- メンバーの具体的な記述を参照しながらフィードバックすること
-- フィードバックのテキストのみを出力すること（JSON不要）
-- 日本語で出力すること`,
+${outputInstructions}`,
   };
 }

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import type { FeedbackResult, FiveAxisEvaluation } from "@/types";
+import type { FeedbackResult, FiveAxisEvaluation, Layer1Evaluation } from "@/types";
 
 const AXIS_LABELS: { key: keyof FiveAxisEvaluation; label: string; short: string }[] = [
   { key: "reportQuality", label: "報告の質", short: "報告" },
@@ -21,6 +21,12 @@ const PATTERN_LABELS: Record<string, { label: string; color: string; desc: strin
   B: { label: "パターンB", color: "bg-yellow-100 text-yellow-800", desc: "1-2軸がLv.2以下: 良い点承認→弱い軸を指摘→改善指示" },
   C: { label: "パターンC", color: "bg-red-100 text-red-800", desc: "3軸以上がLv.2以下: 最重要1軸に絞った深い指導" },
 };
+
+const LAYER1_AXIS_LABELS: { key: keyof Pick<Layer1Evaluation, "growingResourceDecision" | "stagnantCountermeasure" | "overallResourceAllocation">; label: string }[] = [
+  { key: "growingResourceDecision", label: "伸長案件へのリソース判断" },
+  { key: "stagnantCountermeasure", label: "停滞案件への打開策" },
+  { key: "overallResourceAllocation", label: "全体リソース配分の合理性" },
+];
 
 const LEVEL_COLORS = ["", "bg-red-500", "bg-orange-400", "bg-blue-500", "bg-green-500"];
 
@@ -194,6 +200,136 @@ export default function ResultPage() {
           </Button>
         </div>
 
+        {/* ===== Layer 1: 目標進捗×リソース配分 ===== */}
+        {result.layer1 && (
+          <>
+            {/* 進捗スナップショット */}
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle className="text-lg">Layer 1: 目標進捗×リソース配分</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                  <div className="text-center p-3 bg-gray-50 rounded-lg">
+                    <div className="text-xs text-gray-500">月間達成率</div>
+                    <div className={`text-2xl font-bold ${
+                      result.layer1.progressSnapshot.achievementRate >= 100
+                        ? "text-green-600"
+                        : result.layer1.progressSnapshot.achievementRate >= 70
+                        ? "text-yellow-600"
+                        : "text-red-600"
+                    }`}>
+                      {result.layer1.progressSnapshot.achievementRate}%
+                    </div>
+                    <div className="text-xs text-gray-400">
+                      {result.layer1.progressSnapshot.monthlyActual.toLocaleString()}円 / {result.layer1.progressSnapshot.monthlyTarget.toLocaleString()}円
+                    </div>
+                  </div>
+                  <div className="text-center p-3 bg-gray-50 rounded-lg">
+                    <div className="text-xs text-gray-500">日次達成率</div>
+                    <div className={`text-2xl font-bold ${
+                      result.layer1.progressSnapshot.dailyAchievementRate >= 100
+                        ? "text-green-600"
+                        : result.layer1.progressSnapshot.dailyAchievementRate >= 70
+                        ? "text-yellow-600"
+                        : "text-red-600"
+                    }`}>
+                      {result.layer1.progressSnapshot.dailyAchievementRate}%
+                    </div>
+                    <div className="text-xs text-gray-400">
+                      {result.layer1.progressSnapshot.todayTotalRevenue.toLocaleString()}円 / {result.layer1.progressSnapshot.dailyRequiredAmount.toLocaleString()}円
+                    </div>
+                  </div>
+                  <div className="text-center p-3 bg-gray-50 rounded-lg">
+                    <div className="text-xs text-gray-500">月間差分</div>
+                    <div className="text-2xl font-bold text-gray-700">
+                      {result.layer1.progressSnapshot.gap.toLocaleString()}円
+                    </div>
+                  </div>
+                  <div className="text-center p-3 bg-gray-50 rounded-lg">
+                    <div className="text-xs text-gray-500">日次必要額</div>
+                    <div className="text-2xl font-bold text-gray-700">
+                      {result.layer1.progressSnapshot.dailyRequiredAmount.toLocaleString()}円
+                    </div>
+                  </div>
+                </div>
+
+                {/* キャンペーン分類 */}
+                {result.layer1.campaignClassifications.length > 0 && (
+                  <div className="mb-6">
+                    <h3 className="text-sm font-medium mb-2">キャンペーン分類</h3>
+                    <div className="space-y-2">
+                      {result.layer1.campaignClassifications.map((cp, i) => (
+                        <div key={i} className="flex items-start gap-2 text-sm">
+                          <Badge className={
+                            cp.trend === "growing"
+                              ? "bg-green-100 text-green-800 shrink-0"
+                              : "bg-red-100 text-red-800 shrink-0"
+                          }>
+                            {cp.trend === "growing" ? "伸長" : "停滞"}
+                          </Badge>
+                          <span className="font-medium shrink-0">{cp.cpName}</span>
+                          <span className="text-gray-500">{cp.trendReasoning}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Layer 1 3軸評価 */}
+                <div className="space-y-4">
+                  <h3 className="text-sm font-medium">リソース配分評価</h3>
+                  {LAYER1_AXIS_LABELS.map((axis, idx) => {
+                    const axisEval = result.layer1![axis.key];
+                    return (
+                      <div key={axis.key}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium">{axis.label}</span>
+                          <div className="flex items-center gap-1">
+                            {[1, 2, 3, 4].map((lv) => (
+                              <div
+                                key={lv}
+                                className={`w-6 h-6 rounded text-xs flex items-center justify-center font-bold ${
+                                  lv <= axisEval.level
+                                    ? `${LEVEL_COLORS[axisEval.level]} text-white`
+                                    : "bg-gray-100 text-gray-400"
+                                }`}
+                              >
+                                {lv}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        <p className="text-xs text-gray-500">{axisEval.reasoning}</p>
+                        {idx < LAYER1_AXIS_LABELS.length - 1 && (
+                          <Separator className="mt-3" />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Layer 1 フィードバック */}
+            {result.layer1Feedback && (
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle className="text-lg">目標進捗フィードバック</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="prose prose-sm max-w-none whitespace-pre-wrap leading-relaxed">
+                    {result.layer1Feedback}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            <Separator className="mb-6" />
+          </>
+        )}
+
+        {/* ===== Layer 2: 5軸評価 ===== */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
           {/* レーダーチャート */}
           <Card>

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { ReportInput, FiveAxisEvaluation, FeedbackPattern } from "@/types";
+import { ReportInput, FiveAxisEvaluation, FeedbackPattern, Layer1Evaluation, CampaignClassification, ProgressSnapshot } from "@/types";
 import {
   buildEvaluationPrompt,
   buildFeedbackPrompt,
@@ -9,52 +9,53 @@ import { saveToSpreadsheet } from "@/lib/sheets";
 
 const anthropic = new Anthropic();
 
+const axisSchema = {
+  type: "object" as const,
+  properties: {
+    level: { type: "number" as const, enum: [1, 2, 3, 4] },
+    reasoning: { type: "string" as const },
+  },
+  required: ["level", "reasoning"],
+};
+
 const evaluationToolSchema = {
   name: "submit_evaluation",
-  description: "5軸評価の結果を提出する",
+  description: "Layer 1（目標進捗×リソース配分）+ Layer 2（5軸評価）の結果を提出する",
   input_schema: {
     type: "object" as const,
     properties: {
-      reportQuality: {
-        type: "object" as const,
-        properties: {
-          level: { type: "number" as const, enum: [1, 2, 3, 4] },
-          reasoning: { type: "string" as const },
+      // Layer 1
+      campaignClassifications: {
+        type: "array" as const,
+        description: "各キャンペーンの伸長/停滞分類",
+        items: {
+          type: "object" as const,
+          properties: {
+            cpName: { type: "string" as const },
+            trend: { type: "string" as const, enum: ["growing", "stagnant"] },
+            trendReasoning: { type: "string" as const },
+          },
+          required: ["cpName", "trend", "trendReasoning"],
         },
-        required: ["level", "reasoning"],
       },
-      actionSpecificity: {
-        type: "object" as const,
-        properties: {
-          level: { type: "number" as const, enum: [1, 2, 3, 4] },
-          reasoning: { type: "string" as const },
-        },
-        required: ["level", "reasoning"],
+      growingResourceDecision: {
+        ...axisSchema,
+        description: "伸長案件へのリソース判断（Lv.1-4）",
       },
-      decisionCriteria: {
-        type: "object" as const,
-        properties: {
-          level: { type: "number" as const, enum: [1, 2, 3, 4] },
-          reasoning: { type: "string" as const },
-        },
-        required: ["level", "reasoning"],
+      stagnantCountermeasure: {
+        ...axisSchema,
+        description: "停滞案件への打開策（Lv.1-4）",
       },
-      verificationDesign: {
-        type: "object" as const,
-        properties: {
-          level: { type: "number" as const, enum: [1, 2, 3, 4] },
-          reasoning: { type: "string" as const },
-        },
-        required: ["level", "reasoning"],
+      overallResourceAllocation: {
+        ...axisSchema,
+        description: "全体リソース配分の合理性（Lv.1-4）",
       },
-      phaseRecognition: {
-        type: "object" as const,
-        properties: {
-          level: { type: "number" as const, enum: [1, 2, 3, 4] },
-          reasoning: { type: "string" as const },
-        },
-        required: ["level", "reasoning"],
-      },
+      // Layer 2
+      reportQuality: axisSchema,
+      actionSpecificity: axisSchema,
+      decisionCriteria: axisSchema,
+      verificationDesign: axisSchema,
+      phaseRecognition: axisSchema,
       feedbackPattern: {
         type: "string" as const,
         enum: ["A", "B", "C"],
@@ -75,6 +76,10 @@ const evaluationToolSchema = {
       },
     },
     required: [
+      "campaignClassifications",
+      "growingResourceDecision",
+      "stagnantCountermeasure",
+      "overallResourceAllocation",
       "reportQuality",
       "actionSpecificity",
       "decisionCriteria",
@@ -87,15 +92,35 @@ const evaluationToolSchema = {
   },
 };
 
+function parseDelimitedFeedback(text: string): { layer1Feedback: string; layer2Feedback: string } {
+  const layer1Match = text.match(/【LAYER1_START】([\s\S]*?)【LAYER1_END】/);
+  const layer2Match = text.match(/【LAYER2_START】([\s\S]*?)【LAYER2_END】/);
+
+  if (layer1Match && layer2Match) {
+    return {
+      layer1Feedback: layer1Match[1].trim(),
+      layer2Feedback: layer2Match[1].trim(),
+    };
+  }
+
+  // フォールバック: デリミタ解析失敗時は全文をLayer 2に
+  return {
+    layer1Feedback: "",
+    layer2Feedback: text,
+  };
+}
+
 export async function POST(request: NextRequest) {
   try {
     const input: ReportInput = await request.json();
 
-    // Step 1: 5軸評価
+    // Step 1: Layer 1 + Layer 2 評価
     const evalPrompt = buildEvaluationPrompt(input);
+    const progressSnapshot = evalPrompt.progressSnapshot;
+
     const evalResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
-      max_tokens: 2000,
+      max_tokens: 3000,
       system: evalPrompt.system,
       tools: [evaluationToolSchema],
       tool_choice: { type: "tool", name: "submit_evaluation" },
@@ -111,6 +136,12 @@ export async function POST(request: NextRequest) {
     }
 
     const evalResult = toolUseBlock.input as {
+      // Layer 1
+      campaignClassifications: { cpName: string; trend: "growing" | "stagnant"; trendReasoning: string }[];
+      growingResourceDecision: { level: number; reasoning: string };
+      stagnantCountermeasure: { level: number; reasoning: string };
+      overallResourceAllocation: { level: number; reasoning: string };
+      // Layer 2
       reportQuality: { level: number; reasoning: string };
       actionSpecificity: { level: number; reasoning: string };
       decisionCriteria: { level: number; reasoning: string };
@@ -121,6 +152,27 @@ export async function POST(request: NextRequest) {
       applicableAntiPatterns: string[];
     };
 
+    // Layer 1 構築
+    const layer1: Layer1Evaluation | undefined = progressSnapshot
+      ? {
+          progressSnapshot,
+          campaignClassifications: evalResult.campaignClassifications || [],
+          growingResourceDecision: {
+            level: evalResult.growingResourceDecision.level as 1 | 2 | 3 | 4,
+            reasoning: evalResult.growingResourceDecision.reasoning,
+          },
+          stagnantCountermeasure: {
+            level: evalResult.stagnantCountermeasure.level as 1 | 2 | 3 | 4,
+            reasoning: evalResult.stagnantCountermeasure.reasoning,
+          },
+          overallResourceAllocation: {
+            level: evalResult.overallResourceAllocation.level as 1 | 2 | 3 | 4,
+            reasoning: evalResult.overallResourceAllocation.reasoning,
+          },
+        }
+      : undefined;
+
+    // Layer 2 構築
     const evaluation: FiveAxisEvaluation = {
       reportQuality: {
         level: evalResult.reportQuality.level as 1 | 2 | 3 | 4,
@@ -148,17 +200,22 @@ export async function POST(request: NextRequest) {
 
     // Step 2: フィードバック生成
     const evalJson = JSON.stringify(evalResult, null, 2);
-    const fbPrompt = buildFeedbackPrompt(input, evalJson);
+    const fbPrompt = buildFeedbackPrompt(input, evalJson, progressSnapshot);
 
     const fbResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-5-20250929",
-      max_tokens: 2000,
+      max_tokens: 3000,
       system: fbPrompt.system,
       messages: [{ role: "user", content: fbPrompt.user }],
     });
 
-    const feedbackText =
+    const rawFeedbackText =
       fbResponse.content[0].type === "text" ? fbResponse.content[0].text : "";
+
+    // デリミタでLayer 1/Layer 2を分離
+    const { layer1Feedback, layer2Feedback } = progressSnapshot
+      ? parseDelimitedFeedback(rawFeedbackText)
+      : { layer1Feedback: "", layer2Feedback: rawFeedbackText };
 
     // Determine conditional layers
     const lowestLevel = Math.min(
@@ -170,9 +227,11 @@ export async function POST(request: NextRequest) {
     );
 
     const feedbackResult = {
+      layer1,
       evaluation,
       pattern,
-      feedback: feedbackText,
+      layer1Feedback: layer1Feedback || undefined,
+      feedback: layer2Feedback,
       appliedPrinciples: evalResult.applicablePrinciples,
       conditionalLayers: {
         principleTeaching: lowestLevel <= 2,
