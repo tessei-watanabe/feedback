@@ -25,6 +25,11 @@ import type {
   CampaignSummary,
   ScheduleEntry,
   CalendarEvent,
+  PDCARecommendations,
+  CampaignRecommendation,
+  CreativeGroupRecommendation,
+  CreativeAction,
+  BudgetAction,
 } from "@/types";
 
 const STEPS = [
@@ -42,6 +47,21 @@ function getTomorrowDateString(): string {
   const d = new Date();
   d.setDate(d.getDate() + 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function isNewCampaign(cpName: string): boolean {
+  const now = new Date();
+  const month = now.getMonth() + 1;
+  const day = now.getDate();
+  // CP名に含まれる全ての M/D or M-D パターンのうち、最後（右端）のものを採用
+  const datePattern = /(\d{1,2})[/\-](\d{1,2})/g;
+  let lastMatch: { m: number; d: number } | null = null;
+  let m;
+  while ((m = datePattern.exec(cpName)) !== null) {
+    lastMatch = { m: parseInt(m[1], 10), d: parseInt(m[2], 10) };
+  }
+  if (!lastMatch) return false;
+  return lastMatch.m === month && lastMatch.d === day;
 }
 
 function emptyChannel(): ChannelMetrics {
@@ -72,6 +92,7 @@ export default function ReportPage() {
   const [campaignLoading, setCampaignLoading] = useState(false);
   const [campaignError, setCampaignError] = useState<string | null>(null);
   const [campaignFetched, setCampaignFetched] = useState(false);
+  const [recommendations, setRecommendations] = useState<PDCARecommendations | null>(null);
 
   // 目標データを取得
   useEffect(() => {
@@ -110,7 +131,29 @@ export default function ReportPage() {
       const res = await fetch(`/api/campaigns?userName=${encodeURIComponent(campaignUserName.trim())}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "データの取得に失敗しました");
-      setCampaignData(data.rows);
+
+      // レコメンドデータを保存
+      const recs: PDCARecommendations | null = data.recommendations || null;
+      setRecommendations(recs);
+
+      // レコメンドをCPにマッチングしてプリフィル
+      const recsMap = new Map<string, CampaignRecommendation>();
+      if (recs) {
+        for (const rec of recs.campaignRecommendations) {
+          recsMap.set(rec.cpName, rec);
+        }
+      }
+
+      const labeled = data.rows.map((r: CampaignRow) => {
+        const isNew = isNewCampaign(r.cpName);
+        const rec = recsMap.get(r.cpName);
+        return {
+          ...r,
+          label: isNew ? "new" as const : "existing" as const,
+          recommendation: rec,
+        };
+      });
+      setCampaignData(labeled);
       setCampaignSummary(data.summary);
       setCampaignFetched(true);
     } catch (err) {
@@ -153,16 +196,11 @@ export default function ReportPage() {
     );
   };
 
-  // Step 2 バリデーション: 全CPにラベル設定 + 振り返り記入済みか
+  // Step 2 バリデーション: 新規CPのみレビュー必須（既存CPはクリエイティブ分析で自動カバー）
   const isStep2Complete = campaignFetched && campaignData.length > 0 &&
-    campaignData.every((r) => {
-      if (!r.label) return false;
-      if (r.label === "new") {
-        return !!(r.testPurpose?.trim() && r.testResult?.trim() && r.interpretation?.trim());
-      }
-      // existing
-      return !!(r.change?.trim() && r.nextAction?.trim());
-    });
+    campaignData
+      .filter((r) => r.label === "new")
+      .every((r) => !!(r.testPurpose?.trim() && r.testResult?.trim() && r.interpretation?.trim()));
 
   // Step 4: スケジュール + カレンダー連携
   const [schedule, setSchedule] = useState<ScheduleEntry[]>([emptyScheduleEntry()]);
@@ -668,39 +706,15 @@ export default function ReportPage() {
                             {campaignData.map((row, i) => (
                               <tr key={i} className="border-b last:border-0">
                                 <td className="py-2 pr-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setCampaignData((prev) =>
-                                        prev.map((r, idx) =>
-                                          idx === i
-                                            ? {
-                                                ...r,
-                                                label:
-                                                  r.label === "new"
-                                                    ? "existing"
-                                                    : r.label === "existing"
-                                                      ? undefined
-                                                      : "new",
-                                              }
-                                            : r
-                                        )
-                                      );
-                                    }}
+                                  <span
                                     className={`text-xs px-2 py-0.5 rounded-full border whitespace-nowrap ${
                                       row.label === "new"
                                         ? "bg-blue-100 border-blue-300 text-blue-700"
-                                        : row.label === "existing"
-                                          ? "bg-gray-100 border-gray-300 text-gray-700"
-                                          : "bg-white border-dashed border-gray-300 text-gray-400"
+                                        : "bg-gray-100 border-gray-300 text-gray-700"
                                     }`}
                                   >
-                                    {row.label === "new"
-                                      ? "新規"
-                                      : row.label === "existing"
-                                        ? "既存"
-                                        : "未設定"}
-                                  </button>
+                                    {row.label === "new" ? "新規" : "既存"}
+                                  </span>
                                 </td>
                                 <td className="py-2 pr-2 font-medium text-xs">
                                   {row.cpName}
@@ -801,59 +815,198 @@ export default function ReportPage() {
               </Card>
             )}
 
-            {/* 既存キャンペーン振り返り */}
-            {campaignData.filter((r) => r.label === "existing").length > 0 && (
+            {/* クリエイティブ分析カード */}
+            {recommendations && recommendations.creativeGroupRecommendations && recommendations.creativeGroupRecommendations.length > 0 && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base flex items-center gap-2">
-                    <span className="inline-block w-2 h-2 rounded-full bg-gray-500" />
-                    既存キャンペーン振り返り
+                    <span className="inline-block w-2 h-2 rounded-full bg-purple-500" />
+                    クリエイティブ分析
                   </CardTitle>
                   <p className="text-xs text-gray-500">
-                    変化の内容と翌日のアクションを記入してください
+                    クリエイティブ単位で過去データとの比較・予算レコメンドを自動生成しています
                   </p>
                 </CardHeader>
-                <CardContent className="space-y-4">
-                  {campaignData.map((row, i) =>
-                    row.label !== "existing" ? null : (
-                      <div key={i} className="p-4 border border-gray-200 bg-gray-50/30 rounded-lg space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium">{row.cpName}</span>
-                          <span className="text-xs text-gray-500">
-                            消化{row.spend.toLocaleString()}円 / CV{row.cv} / ROAS{row.roas}%
+                <CardContent className="space-y-3">
+                  {recommendations.creativeGroupRecommendations.map((group, gi) => {
+                    const actionConfig: Record<CreativeAction, { label: string; color: string }> = {
+                      keep_old: { label: "既存維持", color: "bg-blue-100 text-blue-700 border-blue-200" },
+                      add_new: { label: "追加推奨", color: "bg-green-100 text-green-700 border-green-200" },
+                      stop_new: { label: "追加停止", color: "bg-red-100 text-red-700 border-red-200" },
+                      scale_both: { label: "拡大推奨", color: "bg-purple-100 text-purple-700 border-purple-200" },
+                      monitor: { label: "経過観察", color: "bg-gray-100 text-gray-600 border-gray-200" },
+                    };
+                    const budgetConfig: Record<BudgetAction, { label: string; icon: string; color: string }> = {
+                      increase: { label: "予算増額", icon: "\u2191", color: "bg-green-100 text-green-700 border-green-300" },
+                      decrease: { label: "予算縮小", icon: "\u2193", color: "bg-orange-100 text-orange-700 border-orange-300" },
+                      maintain: { label: "現状維持", icon: "\u2192", color: "bg-blue-100 text-blue-700 border-blue-300" },
+                      stop: { label: "配信停止", icon: "\u00d7", color: "bg-red-100 text-red-700 border-red-300" },
+                    };
+                    const cfg = actionConfig[group.action];
+                    const roasColor = (roas: number) =>
+                      roas >= 200 ? "text-green-700 font-bold" : roas >= 130 ? "text-amber-700 font-medium" : "text-red-600 font-medium";
+                    return (
+                      <div key={gi} className="p-4 border border-indigo-200 bg-indigo-50/30 rounded-lg space-y-3">
+                        {/* ヘッダー */}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-medium">{group.creativeName || group.creativeKey}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">
+                            {group.members.length}CP
+                          </span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium border ${cfg.color}`}>
+                            {cfg.label}
                           </span>
                         </div>
-                        <div>
-                          <Label className="text-xs">どういう変化があったか（良化/悪化）</Label>
-                          <Input
-                            value={row.change || ""}
-                            onChange={(e) =>
-                              setCampaignData((prev) =>
-                                prev.map((r, idx) =>
-                                  idx === i ? { ...r, change: e.target.value } : r
-                                )
-                              )
-                            }
-                            placeholder="例: ROASが150%→200%に改善。CVRが0.5%上昇。"
-                          />
+
+                        {/* 予算レコメンドバッジ */}
+                        {group.budgetRecommendation && (() => {
+                          const bcfg = budgetConfig[group.budgetRecommendation!.action];
+                          return (
+                            <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${bcfg.color}`}>
+                              <span className="text-base">{bcfg.icon}</span>
+                              <span className="text-sm font-medium">
+                                {bcfg.label}
+                                {group.budgetRecommendation!.percentChange !== 0 && group.budgetRecommendation!.percentChange !== -100 &&
+                                  ` (${group.budgetRecommendation!.percentChange > 0 ? "+" : ""}${group.budgetRecommendation!.percentChange}%)`
+                                }
+                              </span>
+                              {group.budgetRecommendation!.action !== "stop" && (
+                                <span className="text-xs ml-auto">
+                                  目安消化 ¥{group.budgetRecommendation!.targetSpend.toLocaleString()}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        {/* 履歴比較テーブル */}
+                        {group.historicalComparison && (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="border-b text-left text-gray-500">
+                                  <th className="py-1.5 pr-2 font-medium">期間</th>
+                                  <th className="py-1.5 pr-2 font-medium text-right">消化</th>
+                                  <th className="py-1.5 pr-2 font-medium text-right">CV</th>
+                                  <th className="py-1.5 pr-2 font-medium text-right">売上</th>
+                                  <th className="py-1.5 font-medium text-right">ROAS</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {group.historicalComparison.avg7Day && (
+                                  <tr className="border-b">
+                                    <td className="py-1.5 pr-2 text-gray-600">7日平均</td>
+                                    <td className="py-1.5 pr-2 text-right">¥{group.historicalComparison.avg7Day.spend.toLocaleString()}</td>
+                                    <td className="py-1.5 pr-2 text-right">{group.historicalComparison.avg7Day.cv}</td>
+                                    <td className="py-1.5 pr-2 text-right">¥{group.historicalComparison.avg7Day.revenue.toLocaleString()}</td>
+                                    <td className={`py-1.5 text-right ${roasColor(group.historicalComparison.avg7Day.roas)}`}>{group.historicalComparison.avg7Day.roas}%</td>
+                                  </tr>
+                                )}
+                                {group.historicalComparison.avg3Day && (
+                                  <tr className="border-b">
+                                    <td className="py-1.5 pr-2 text-gray-600">3日平均</td>
+                                    <td className="py-1.5 pr-2 text-right">¥{group.historicalComparison.avg3Day.spend.toLocaleString()}</td>
+                                    <td className="py-1.5 pr-2 text-right">{group.historicalComparison.avg3Day.cv}</td>
+                                    <td className="py-1.5 pr-2 text-right">¥{group.historicalComparison.avg3Day.revenue.toLocaleString()}</td>
+                                    <td className={`py-1.5 text-right ${roasColor(group.historicalComparison.avg3Day.roas)}`}>{group.historicalComparison.avg3Day.roas}%</td>
+                                  </tr>
+                                )}
+                                {group.historicalComparison.yesterday && (
+                                  <tr className="border-b">
+                                    <td className="py-1.5 pr-2 text-gray-600">昨日</td>
+                                    <td className="py-1.5 pr-2 text-right">¥{group.historicalComparison.yesterday.spend.toLocaleString()}</td>
+                                    <td className="py-1.5 pr-2 text-right">{group.historicalComparison.yesterday.cv}</td>
+                                    <td className="py-1.5 pr-2 text-right">¥{group.historicalComparison.yesterday.revenue.toLocaleString()}</td>
+                                    <td className={`py-1.5 text-right ${roasColor(group.historicalComparison.yesterday.roas)}`}>{group.historicalComparison.yesterday.roas}%</td>
+                                  </tr>
+                                )}
+                                <tr>
+                                  <td className="py-1.5 pr-2 font-medium">今日</td>
+                                  <td className="py-1.5 pr-2 text-right font-medium">¥{group.historicalComparison.today.spend.toLocaleString()}</td>
+                                  <td className="py-1.5 pr-2 text-right font-medium">{group.historicalComparison.today.cv}</td>
+                                  <td className="py-1.5 pr-2 text-right font-medium">¥{group.historicalComparison.today.revenue.toLocaleString()}</td>
+                                  <td className={`py-1.5 text-right ${roasColor(group.historicalComparison.today.roas)}`}>{group.historicalComparison.today.roas}%</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+
+                        {/* 履歴なしの場合は合算指標のみ表示 */}
+                        {!group.historicalComparison && (
+                          <div className="flex gap-3 text-xs">
+                            <span>消化 <span className="font-medium">¥{group.combinedSpend.toLocaleString()}</span></span>
+                            <span>CV <span className="font-medium">{group.combinedCV}</span></span>
+                            <span>ROAS <span className={roasColor(group.combinedROAS)}>{group.combinedROAS}%</span></span>
+                          </div>
+                        )}
+
+                        {/* 自動生成テキスト */}
+                        <div className="space-y-2">
+                          <div className="bg-white/60 p-2 rounded border border-gray-100">
+                            <p className="text-[10px] text-gray-400 mb-0.5">変化</p>
+                            <p className="text-xs text-gray-700">{group.autoChange}</p>
+                          </div>
+                          <div className="bg-white/60 p-2 rounded border border-gray-100">
+                            <p className="text-[10px] text-gray-400 mb-0.5">ネクストアクション</p>
+                            <p className="text-xs text-gray-700">{group.autoNextAction}</p>
+                          </div>
                         </div>
-                        <div>
-                          <Label className="text-xs">翌日のアクション</Label>
-                          <Input
-                            value={row.nextAction || ""}
-                            onChange={(e) =>
-                              setCampaignData((prev) =>
-                                prev.map((r, idx) =>
-                                  idx === i ? { ...r, nextAction: e.target.value } : r
-                                )
-                              )
-                            }
-                            placeholder="例: 予算20%アップして継続。損切りラインはCPA3,000円。"
-                          />
-                        </div>
+
+                        {/* メンバー一覧（折りたたみ） */}
+                        <details className="text-[10px] text-gray-400">
+                          <summary className="cursor-pointer hover:text-gray-600">メンバー一覧</summary>
+                          <div className="mt-1 space-y-1 pl-2">
+                            {group.members.map((m, mi) => (
+                              <div key={mi} className="flex items-center gap-2">
+                                <span className={`px-1 py-0.5 rounded ${m.isRecent ? "bg-blue-50 text-blue-600" : "bg-gray-50 text-gray-500"}`}>
+                                  {m.isRecent ? "新規" : "過去"}
+                                </span>
+                                <span className="truncate">{m.cpName}</span>
+                                <span className="ml-auto shrink-0">ROAS {m.roas}%</span>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
                       </div>
-                    )
-                  )}
+                    );
+                  })}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* 停止CP再開推奨カード */}
+            {recommendations && recommendations.restartRecommendations.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <span className="inline-block w-2 h-2 rounded-full bg-orange-500" />
+                    停止CP再開推奨
+                  </CardTitle>
+                  <p className="text-xs text-gray-500">
+                    過去7日のデータから再開を推奨するキャンペーンです
+                  </p>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {recommendations.restartRecommendations.map((restart, ri) => (
+                    <div key={ri} className="p-4 border border-orange-200 bg-orange-50/30 rounded-lg space-y-2">
+                      <div className="flex items-center justify-between flex-wrap gap-1">
+                        <span className="text-sm font-medium">{restart.cpName}</span>
+                        <span className="text-xs text-gray-500">
+                          最終稼働: {restart.lastActiveDate}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 text-xs">
+                        <span className="px-1.5 py-0.5 rounded bg-green-100 text-green-700">
+                          7日平均ROAS {restart.avgROAS7Day}%
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">
+                          ピークROAS {restart.peakROAS}%
+                        </span>
+                      </div>
+                      <p className="text-xs text-gray-600">{restart.reason}</p>
+                    </div>
+                  ))}
                 </CardContent>
               </Card>
             )}
@@ -955,12 +1108,6 @@ export default function ReportPage() {
                               <span>MCV <span className="font-medium text-gray-900">{r.mcv}</span></span>
                               <span>ROAS <span className="font-medium text-gray-900">{r.roas}%</span></span>
                             </div>
-                            {(r.change || r.nextAction) && (
-                              <div className="pt-1 border-t border-gray-200 space-y-1 text-xs text-gray-700">
-                                {r.change && <p>変化: {r.change}</p>}
-                                {r.nextAction && <p>アクション: {r.nextAction}</p>}
-                              </div>
-                            )}
                           </div>
                         ))}
                     </div>
@@ -1460,7 +1607,7 @@ export default function ReportPage() {
             <div className="flex items-center gap-3">
               {currentStep === 1 && !isStep2Complete && campaignFetched && (
                 <p className="text-xs text-red-500">
-                  全キャンペーンの区分設定と振り返り記入が必要です
+                  新規キャンペーンの検証目的・結果・解釈の記入が必要です
                 </p>
               )}
               <Button

@@ -129,8 +129,6 @@ function formatCampaignData(rows: CampaignRow[], summary: CampaignSummary | null
     text += `\n**既存キャンペーン（${existingCPs.length}件）**\n`;
     for (const r of existingCPs) {
       text += `\n- ${r.cpName}: 消化${r.spend.toLocaleString()}円 / CV${r.cv} / MCV${r.mcv} / ROAS${r.roas}% / 売上${r.revenue.toLocaleString()}円\n`;
-      if (r.change) text += `  - 変化: ${r.change}\n`;
-      if (r.nextAction) text += `  - 翌日アクション: ${r.nextAction}\n`;
     }
   }
 

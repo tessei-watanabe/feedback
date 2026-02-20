@@ -138,10 +138,125 @@ export interface CampaignRow {
   testResult?: string;
   /** 新規CP: 結果の解釈 */
   interpretation?: string;
-  /** 既存CP: どういう変化があったか */
-  change?: string;
-  /** 既存CP: 翌日のアクション */
-  nextAction?: string;
+  /** PDCAレコメンド */
+  recommendation?: CampaignRecommendation;
+}
+
+// ===== PDCA自動レコメンド型定義 =====
+
+export interface HistoricalCampaignDay {
+  date: string;         // "2026/02/18"
+  cpName: string;
+  spend: number;
+  cv: number;
+  mcv: number;
+  roas: number;
+  imp: number;
+  click: number;
+  cpa: number;
+}
+
+export type ROASTier = "high" | "medium" | "low";
+
+export interface ROASTrend {
+  tier: ROASTier;
+  avg3Day: number;
+  dayOverDay: number;     // 前日比変化率(%)
+  threeDayChange: number; // 3日間変化率(%)
+  trend: "up" | "flat" | "down";
+}
+
+export type ChangeLever = "operation" | "creative";
+
+export interface CampaignRecommendation {
+  cpName: string;
+  roasTrend: ROASTrend;
+  lever: ChangeLever;
+  leverReasoning: string;
+  change: string;          // 自動生成「変化」テキスト
+  nextAction: string;      // 自動生成「アクション」テキスト
+  isStandout: boolean;     // グループ内で特に好調な個別CP
+  groupName?: string;
+  history: HistoricalCampaignDay[];
+}
+
+export interface CampaignGroupRecommendation {
+  groupName: string;
+  members: string[];
+  groupROASTrend: ROASTrend;
+  lever: ChangeLever;
+  groupChange: string;
+  groupAction: string;
+}
+
+export interface CreativeMember {
+  cpName: string;
+  submissionDates: string[];
+  isRecent: boolean;
+  spend: number;
+  cv: number;
+  revenue: number;
+  roas: number;
+}
+
+export type CreativeAction = "keep_old" | "add_new" | "stop_new" | "scale_both" | "monitor";
+
+export interface CreativeHistoricalMetrics {
+  spend: number;
+  cv: number;
+  revenue: number;
+  roas: number;
+}
+
+export interface CreativeHistoricalComparison {
+  avg7Day: CreativeHistoricalMetrics | null;
+  avg3Day: CreativeHistoricalMetrics | null;
+  yesterday: CreativeHistoricalMetrics | null;
+  today: CreativeHistoricalMetrics;
+}
+
+export type BudgetAction = "increase" | "decrease" | "maintain" | "stop";
+
+export interface BudgetRecommendation {
+  action: BudgetAction;
+  percentChange: number;
+  targetSpend: number;
+  reasoning: string;
+}
+
+export interface CreativeGroupRecommendation {
+  creativeKey: string;
+  productName: string;
+  creativeName: string;
+  members: CreativeMember[];
+  combinedSpend: number;
+  combinedRevenue: number;
+  combinedROAS: number;
+  combinedCV: number;
+  oldMetrics: { spend: number; revenue: number; roas: number; cv: number } | null;
+  newMetrics: { spend: number; revenue: number; roas: number; cv: number } | null;
+  action: CreativeAction;
+  recommendation: string;
+  historicalComparison: CreativeHistoricalComparison | null;
+  budgetRecommendation: BudgetRecommendation | null;
+  autoChange: string;
+  autoNextAction: string;
+}
+
+export interface RestartRecommendation {
+  cpName: string;
+  lastActiveDate: string;
+  peakROAS: number;
+  avgROAS7Day: number;
+  reason: string;
+}
+
+export interface PDCARecommendations {
+  generatedAt: string;
+  campaignRecommendations: CampaignRecommendation[];
+  groupRecommendations: CampaignGroupRecommendation[];
+  creativeGroupRecommendations: CreativeGroupRecommendation[];
+  restartRecommendations: RestartRecommendation[];
 }
 
 export interface CampaignSummary {

@@ -1,6 +1,6 @@
 import { google } from "googleapis";
 import path from "path";
-import type { ReportInput, FeedbackResult, TargetData, CampaignRow, CampaignSummary } from "@/types";
+import type { ReportInput, FeedbackResult, TargetData, CampaignRow, CampaignSummary, HistoricalCampaignDay } from "@/types";
 
 function getAuth() {
   // Vercel: 環境変数にJSON文字列として格納
@@ -384,6 +384,162 @@ export async function readTargetData(): Promise<TargetData> {
 }
 
 /**
+ * 過去のキャンペーンデータを統合元データシートから取得
+ * C列（CP名）でフィルタし、同一CP+日付のアドセット行を合算
+ * ベース名（末尾の数字除去）でグルーピング
+ * @returns Map<baseName, HistoricalCampaignDay[]>（日付昇順）
+ */
+export async function readHistoricalCampaignData(
+  userName: string,
+  lookbackDays: number = 7
+): Promise<Map<string, HistoricalCampaignDay[]>> {
+  const spreadsheetId = process.env.GOOGLE_HISTORY_SPREADSHEET_ID;
+  if (!spreadsheetId) throw new Error("GOOGLE_HISTORY_SPREADSHEET_ID is not set");
+
+  const sheets = getSheets();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "'統合元データ'!A:P",
+  });
+
+  const allRows = res.data.values || [];
+  if (allRows.length <= 1) return new Map();
+
+  // ヘッダー行を動的解析してカラムインデックスを特定
+  const header = allRows[0].map((h: string) => String(h).trim());
+
+  // ROAS列を先に特定（CV列の曖昧さ解消に使う）
+  const roasIdx = header.findIndex((h: string) => /^ROAS$/i.test(h));
+  const mcvIdx = header.findIndex((h: string) => /^MCV$|^媒体CV$/i.test(h));
+
+  // CV列が複数ある場合、ROAS/MCV近傍のものを採用
+  let cvIdx = -1;
+  if (roasIdx >= 0) {
+    // ROAS列の前方でCVを探す（MCV, CV, ... ROAS の並び想定）
+    for (let j = roasIdx - 1; j >= 0; j--) {
+      if (/^CV$/i.test(header[j])) { cvIdx = j; break; }
+    }
+  }
+  if (cvIdx < 0) cvIdx = header.findIndex((h: string) => /^CV$/i.test(h));
+
+  const colIndex = {
+    cpName: header.findIndex((h: string) => /^CP名$|^キャンペーン名$/i.test(h)),
+    date: header.findIndex((h: string) => /^日付$/i.test(h)),
+    spend: header.findIndex((h: string) => /消化|費用|コスト/i.test(h)),
+    cv: cvIdx,
+    mcv: mcvIdx,
+    roas: roasIdx,
+    imp: header.findIndex((h: string) => /^imp$/i.test(h)),
+    click: header.findIndex((h: string) => /^click$/i.test(h)),
+    cpa: header.findIndex((h: string) => /^CPA$/i.test(h)),
+  };
+
+  // フォールバック: 見つからない場合は想定位置
+  if (colIndex.cpName < 0) colIndex.cpName = 2;  // C列
+  if (colIndex.date < 0) colIndex.date = 11; // L列
+  if (colIndex.spend < 0) colIndex.spend = 5; // F列
+  if (colIndex.cv < 0) colIndex.cv = 12; // M列（ROAS近傍）
+  if (colIndex.mcv < 0) colIndex.mcv = 13; // N列
+  if (colIndex.roas < 0) colIndex.roas = 14; // O列
+  if (colIndex.imp < 0) colIndex.imp = 7; // H列
+  if (colIndex.click < 0) colIndex.click = 8; // I列
+  if (colIndex.cpa < 0) colIndex.cpa = 15; // P列
+
+  // カットオフ日を計算（今日を含まない過去N日分）
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const cutoff = new Date(today);
+  cutoff.setDate(cutoff.getDate() - lookbackDays);
+
+  // 日付フォーマットのパース: "2026/02/18" or "2026-02-18"
+  function parseHistDate(dateStr: string): Date | null {
+    if (!dateStr) return null;
+    const cleaned = String(dateStr).trim();
+    const match = cleaned.match(/(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})/);
+    if (!match) return null;
+    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  }
+
+  // 日付を "YYYY/MM/DD" 形式に正規化
+  function formatDate(d: Date): string {
+    return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  // フィルタ＆パース（アドセット行も全て取得し、後で合算）
+  const filtered: { baseName: string; day: HistoricalCampaignDay }[] = [];
+  for (let i = 1; i < allRows.length; i++) {
+    const row = allRows[i];
+    if (!row) continue;
+
+    const cpName = String(row[colIndex.cpName] || "");
+    const dateStr = String(row[colIndex.date] || "");
+
+    // C列のCP名にuserNameを含む行のみ
+    if (!cpName.includes(userName)) continue;
+
+    // 日付フィルタ
+    const date = parseHistDate(dateStr);
+    if (!date) continue;
+    if (date < cutoff || date >= today) continue;
+
+    const spend = parseCurrency(row[colIndex.spend]);
+    const roasVal = parsePercentage(row[colIndex.roas]);
+    const cvVal = Number(row[colIndex.cv] || 0);
+
+    // ベース名: CP名から末尾の空白+数字を除去
+    const baseName = cpName.replace(/\s+\d+$/, "");
+
+    filtered.push({
+      baseName,
+      day: {
+        date: formatDate(date),
+        cpName: baseName,
+        spend,
+        cv: cvVal,
+        mcv: Number(row[colIndex.mcv] || 0),
+        roas: roasVal,
+        imp: Number(row[colIndex.imp] || 0),
+        click: Number(row[colIndex.click] || 0),
+        cpa: parseCurrency(row[colIndex.cpa]),
+      },
+    });
+  }
+
+  // ベース名 + 日付でグルーピング＆合算（同一CP+日付の複数アドセット行を合算）
+  const groupMap = new Map<string, Map<string, HistoricalCampaignDay>>();
+  for (const { baseName, day } of filtered) {
+    if (!groupMap.has(baseName)) groupMap.set(baseName, new Map());
+    const dateMap = groupMap.get(baseName)!;
+    const existing = dateMap.get(day.date);
+    if (existing) {
+      // 合算: revenue逆算方式（ROAS = revenue / spend * 100）
+      const existingRevenue = existing.spend * existing.roas / 100;
+      const newRevenue = day.spend * day.roas / 100;
+      existing.spend += day.spend;
+      existing.cv += day.cv;
+      existing.mcv += day.mcv;
+      existing.imp += day.imp;
+      existing.click += day.click;
+      const totalRevenue = existingRevenue + newRevenue;
+      existing.roas = existing.spend > 0 ? Math.round((totalRevenue / existing.spend) * 10000) / 100 : 0;
+      existing.cpa = existing.cv > 0 ? Math.round(existing.spend / existing.cv) : 0;
+    } else {
+      dateMap.set(day.date, { ...day, cpName: baseName });
+    }
+  }
+
+  // Map<baseName, HistoricalCampaignDay[]>に変換（日付昇順）
+  const result = new Map<string, HistoricalCampaignDay[]>();
+  for (const [baseName, dateMap] of groupMap) {
+    const days = Array.from(dateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+    result.set(baseName, days);
+  }
+
+  return result;
+}
+
+/**
  * 日報の入力データとフィードバック結果をスプレッドシートに保存
  */
 export async function saveToSpreadsheet(
@@ -428,7 +584,7 @@ export async function saveToSpreadsheet(
         `【新規】${r.cpName}: 検証=${r.testPurpose || ""} / 結果=${r.testResult || ""} / 解釈=${r.interpretation || ""}`
       ),
       ...input.analysis.campaignData.filter((r) => r.label === "existing").map((r) =>
-        `【既存】${r.cpName}: 変化=${r.change || ""} / アクション=${r.nextAction || ""}`
+        `【既存】${r.cpName}: 消化¥${r.spend.toLocaleString()} / CV ${r.cv} / ROAS ${r.roas}%`
       ),
     ].filter(Boolean).join("\n"),
     formatActionPlans(input.actionPlans),

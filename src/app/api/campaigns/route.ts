@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readCampaignData } from "@/lib/sheets";
+import { readCampaignData, readHistoricalCampaignData } from "@/lib/sheets";
+import { generatePDCARecommendations } from "@/lib/recommendation";
 
 export async function GET(request: NextRequest) {
   try {
@@ -13,8 +14,26 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const data = await readCampaignData(userName);
-    return NextResponse.json(data);
+    // 今日のデータと過去データを並列取得
+    const [todayData, historyMap] = await Promise.all([
+      readCampaignData(userName),
+      readHistoricalCampaignData(userName, 7).catch((err) => {
+        console.warn("[campaigns] 過去データ取得失敗（グレースフルデグレード）:", err.message);
+        return new Map();
+      }),
+    ]);
+
+    // 過去データがあればレコメンド生成
+    let recommendations = null;
+    if (historyMap.size > 0) {
+      recommendations = generatePDCARecommendations(todayData.rows, historyMap);
+    }
+
+    return NextResponse.json({
+      rows: todayData.rows,
+      summary: todayData.summary,
+      recommendations,
+    });
   } catch (error) {
     console.error("Campaign data fetch error:", error);
     return NextResponse.json(
